@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name        New script - ententee.com
+// @name        ententee redmine time reporting
 // @namespace   Violentmonkey Scripts
 // @match       https://redmine.ententee.com/projects/*/time_entries/new
 // @grant       none
@@ -8,6 +8,7 @@
 // @description 8/30/2023, 12:26:12 PM
 // ==/UserScript==
 
+const projectName = window.location.pathname.match(/projects\/([^\/]*)/)[1]
 const content = document.getElementById("content");
 const form = document.getElementById("new_time_entry");
 
@@ -24,15 +25,27 @@ const reportDiv = document.createElement("div")
 content.insertBefore(reportDiv, form)
 
 let reports = []
+let apiKey = null;
 
-async function fetchApiKey() {
+async function ensureApiKeyFetched() {
+  if (apiKey != null) return;
   const apiKeyResponse = await fetch("https://redmine.ententee.com/my/api_key")
-  const apiKey = (await apiKeyResponse.text()).match(/<pre>(.*)<\/pre>/)[1]
-  return apiKey
+  apiKey = (await apiKeyResponse.text()).match(/<pre>(.*)<\/pre>/)[1]
+}
+
+async function fetchExistingReports(from, to) {
+  await ensureApiKeyFetched()
+  const userId = document.getElementsByClassName("user active")[0].href.split("/")[4]
+  const response = await fetch(`https://redmine.ententee.com/time_entries.json?from=${from}&to=${to}&project_id=${projectName}&user_id=${userId}`, {
+    headers: {
+      "X-Redmine-API-Key": apiKey
+    }
+  })
+  return await response.json()
 }
 
 
-function importData() {
+async function importData() {
   const rawData = inputTextBox.value;
   const table = rawData.split("\n").map(line => line.split("\t"))
   const days = table[0].slice(4, 11).map(date => {
@@ -45,7 +58,6 @@ function importData() {
     }
     return `${parts[2]}-${parts[1]}-${parts[0]}` // to ISO
   })
-  console.log(days)
 
   const taskRows = table.slice(2)
 
@@ -62,41 +74,54 @@ function importData() {
       }))
       .filter(obj => obj.time !== 0)
   )
-  console.log(tasks)
   reports = tasks
-  renderReports()
+  renderReports(days)
+  inputTextBox.value = ""
 }
 
 
-function renderReports() {
+function renderReports(days) {
   reportDiv.textContent = ''
 
-  let divContent = reports.map(report => `
-    <div>
-      <span>${report.task ?? ""}</span><br />
-      <span>${report.day}</span><br />
-      <span>${report.time}</span><br />
-      <span>${report.description}</span><br />
-      <span>${report.category}</span><br />
+  const reportsByDay = []
+  for(const day of days) {
+    reportsByDay.push(reports.filter(report => report.day == day))
+  }
+
+  let divContent = `
+    <div style="display:  flex; justify-content: space-between; flex-wrap: wrap;">
+      ${reportsByDay.map((dayReports, index) => `
+        <div style="padding: 0.5em; margin: 0.5em; background-color: #d6d6d6;">
+          <span>${days[index]}</span>
+          ${dayReports.map(report => `
+            <div class="box">
+              <span>Task: ${report.task ?? "N/A"}</span><br />
+              <span>Time: ${report.time}h</span><br />
+              <span>Note: ${report.description}</span><br />
+              <span>Category: ${report.category}</span><br />
+            </div>
+          `).join("")}
+        </div>
+      `).join("")}
     </div>
-  `)
+  `
 
-  divContent.push('<input id="push-reports" type="button" value="Create"/>')
+  divContent += '<input id="push-reports" type="button" value="Create"/>'
 
-  reportDiv.innerHTML = divContent.join("")
+  reportDiv.innerHTML = divContent
   document.getElementById("push-reports").addEventListener("click", pushReports)
 }
 
-async function getProjectId(apiKey) {
+async function getProjectId() {
+  await ensureApiKeyFetched()
   const allProjects = await (await fetch("https://redmine.ententee.com/projects.json", {
     method: 'GET',
     headers: {
       "X-Redmine-API-Key": apiKey
     }
   })).json()
-  const thisProjectIdentifier = window.location.pathname.match(/projects\/([^\/]*)/)[1]
 
-  return allProjects.projects.find(proj => proj.identifier === thisProjectIdentifier).id
+  return allProjects.projects.find(proj => proj.identifier === projectName).id
 }
 
 function getActivityIdMap() {
@@ -112,7 +137,7 @@ function getActivityIdMap() {
 
 async function pushReports(sender, e) {
   sender.enabled = false
-  const apiKey = await fetchApiKey()
+  await ensureApiKeyFetched()
   const projectId = await getProjectId(apiKey)
   const activityIds = getActivityIdMap()
 
